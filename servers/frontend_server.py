@@ -148,7 +148,7 @@ def _host_is_public(host, port):
     return bool(addresses) and all(address.is_global for address in addresses)
 
 
-def _read_response(url, max_bytes):
+def _read_response(url, max_bytes, referer=None):
     current_url = validate_url(url)
     visited = set()
     for _ in range(MAX_REDIRECTS + 1):
@@ -157,12 +157,18 @@ def _read_response(url, max_bytes):
             raise ValueError('The destination returned a redirect loop.')
         visited.add(current_url)
 
-        request = Request(current_url, headers={
-            'User-Agent': 'Technetium/1.0',
-            'Accept': 'text/html, text/css, image/*, */*;q=0.1',
+        request_headers = {
+            'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,image/svg+xml,*/*;q=0.8',
             'Accept-Encoding': 'identity',
             'Connection': 'close',
-        }, method='GET')
+        }
+        if referer:
+            try:
+                request_headers['Referer'] = validate_url(referer)
+            except ValueError:
+                pass
+        request = Request(current_url, headers=request_headers, method='GET')
         try:
             response = _proxy_opener.open(request, timeout=REQUEST_TIMEOUT)
         except HTTPError as error:
@@ -194,7 +200,8 @@ def _resource_url(url, base_url):
         absolute = validate_url(absolute)
     except ValueError:
         return ''
-    return '/api/resource?url=' + quote(absolute, safe='')
+    referer = validate_url(base_url)
+    return '/api/resource?url=' + quote(absolute, safe='') + '&referer=' + quote(referer, safe='')
 
 
 def _rewrite_css(css, base_url):
@@ -391,7 +398,11 @@ class FrontendRequestHandler(BaseHTTPRequestHandler):
         if parsed.path == '/api/browse':
             self._browse(parse_qs(parsed.query).get('url', [''])[0])
         elif parsed.path == '/api/resource':
-            self._resource(parse_qs(parsed.query).get('url', [''])[0])
+            query = parse_qs(parsed.query)
+            self._resource(
+                query.get('url', [''])[0],
+                query.get('referer', [''])[0],
+            )
         elif parsed.path == '/api/debug/logs':
             try:
                 limit = int(parse_qs(parsed.query).get('limit', ['100'])[0])
@@ -464,14 +475,15 @@ class FrontendRequestHandler(BaseHTTPRequestHandler):
                 'page', final_url, status, content_type,
                 (time.perf_counter() - started) * 1000, debug_error)
 
-    def _resource(self, url):
+    def _resource(self, url, referer=None):
         started = time.perf_counter()
         final_url = url
         status = None
         content_type = None
         debug_error = None
         try:
-            final_url, status, headers, body = _read_response(url, MAX_RESOURCE_BYTES)
+            final_url, status, headers, body = _read_response(
+                url, MAX_RESOURCE_BYTES, referer)
             content_type = headers.get('Content-Type', '').split(';', 1)[0].strip().lower()
             if not (content_type.startswith('image/')
                     or content_type == 'text/css'
@@ -518,7 +530,7 @@ class FrontendRequestHandler(BaseHTTPRequestHandler):
         if target.name == 'index.html':
             headers['Content-Security-Policy'] = (
                 "default-src 'self'; frame-src 'self'; img-src 'self' data:; "
-                "style-src 'self'; script-src 'self'; connect-src 'self'; "
+                "style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self'; "
                 "object-src 'none'; base-uri 'none'; frame-ancestors 'none'")
             headers['Referrer-Policy'] = 'no-referrer'
         self._send(200, body, content_type + ('; charset=utf-8' if content_type.startswith('text/') else ''), headers)
